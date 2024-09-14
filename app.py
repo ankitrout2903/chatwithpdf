@@ -1,97 +1,100 @@
-import streamlit as st
-from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+import tempfile
+from PIL import Image
+
+# Import os to set API key
 import os
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_community.embeddings.spacy_embeddings import SpacyEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.tools.retriever import create_retriever_tool
-from dotenv import load_dotenv
-from langchain_anthropic import ChatAnthropic
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+# Import OpenAI as main LLM service
+from langchain.llms import OpenAI
+from langchain.embeddings import OpenAIEmbeddings
+# Bring in streamlit for UI/app interface
+import streamlit as st
 
-load_dotenv()
-embeddings = SpacyEmbeddings(model_name="en_core_web_sm")
-def pdf_read(pdf_doc):
-    text = ""
-    for pdf in pdf_doc:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-    return text
+# Import PDF document loaders...there's other ones as well!
+from langchain.document_loaders import PyPDFLoader
+# Import chroma as the vector store 
+from langchain.vectorstores import Chroma
 
-
-
-def get_chunks(text):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = text_splitter.split_text(text)
-    return chunks
-
-
-def vector_store(text_chunks):
-    
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local("faiss_db")
-
-
-def get_conversational_chain(tools,ques):
-    #os.environ["ANTHROPIC_API_KEY"]=os.getenv["ANTHROPIC_API_KEY"]
-    llm = ChatAnthropic(model="claude-3-sonnet-20240229", temperature=0, api_key=os.getenv("ANTHROPIC_API_KEY"),verbose=True)
-
-    prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """You are a helpful assistant. Answer the question as detailed as possible from the provided context, make sure to provide all the details, if the answer is not in
-    provided context just say, "answer is not available in the context", don't provide the wrong answer""",
-        ),
-        ("placeholder", "{chat_history}"),
-        ("human", "{input}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ]
+# Import vector store stuff
+from langchain.agents.agent_toolkits import (
+    create_vectorstore_agent,
+    VectorStoreToolkit,
+    VectorStoreInfo
 )
-    tool=[tools]
-    agent = create_tool_calling_agent(llm, tool, prompt)
-
-    agent_executor = AgentExecutor(agent=agent, tools=tool, verbose=True)
-    response=agent_executor.invoke({"input": ques})
-    print(response)
-    st.write("Reply: ", response['output'])
 
 
+# Set the title and subtitle of the app
+st.title('🦜🔗 PDF-Chat: Interact with Your PDFs in a Conversational Way')
+st.subheader('Load your PDF, ask questions, and receive answers directly from the document.')
 
-def user_input(user_question):
-    
-    
-    
-    new_db = FAISS.load_local("faiss_db", embeddings,allow_dangerous_deserialization=True)
-    
-    retriever=new_db.as_retriever()
-    retrieval_chain= create_retriever_tool(retriever,"pdf_extractor","This tool is to give answer to queries from the pdf")
-    get_conversational_chain(retrieval_chain,user_question)
+# Load the image 
+image = Image.open('PDF-Chat App.png')
+st.image(image)
+
+# Loading the Pdf file and return a temporary path for it 
+st.subheader('Upload your pdf')
+uploaded_file = st.file_uploader('', type=(['pdf',"tsv","csv","txt","tab","xlsx","xls"]))
+
+temp_file_path = os.getcwd()
+while uploaded_file is None:
+    x = 1
+        
+if uploaded_file is not None:
+    # Save the uploaded file to a temporary location
+    temp_dir = tempfile.TemporaryDirectory()
+    temp_file_path = os.path.join(temp_dir.name, uploaded_file.name)
+    with open(temp_file_path, "wb") as temp_file:
+        temp_file.write(uploaded_file.read())
+
+    st.write("Full path of the uploaded file:", temp_file_path)
+
+# Set APIkey for OpenAI Service
+# Can sub this out for other LLM providers
+os.environ['OPENAI_API_KEY'] = # Your OpenAI API Key
+
+# Create instance of OpenAI LLM
+llm = OpenAI(temperature=0.1, verbose=True)
+embeddings = OpenAIEmbeddings()
+
+# Create and load PDF Loader
+loader = PyPDFLoader(temp_file_path)
+# Split pages from pdf 
+pages = loader.load_and_split()
+
+# Load documents into vector database aka ChromaDB
+store = Chroma.from_documents(pages, embeddings, collection_name='Pdf')
+
+# Create vectorstore info object
+vectorstore_info = VectorStoreInfo(
+    name="Pdf",
+    description=" A pdf file to answer your questions",
+    vectorstore=store
+)
+# Convert the document store into a langchain toolkit
+toolkit = VectorStoreToolkit(vectorstore_info=vectorstore_info)
+
+# Add the toolkit to an end-to-end LC
+agent_executor = create_vectorstore_agent(
+    llm=llm,
+    toolkit=toolkit,
+    verbose=True
+)
+
+# Create a text input box for the user
+prompt = st.text_input('Input your prompt here')
+
+# If the user hits enter
+if prompt:
+    # Then pass the prompt to the LLM
+    response = agent_executor.run(prompt)
+    # ...and write it out to the screen
+    st.write(response)
+
+    # With a streamlit expander  
+    with st.expander('Document Similarity Search'):
+        # Find the relevant pages
+        search = store.similarity_search_with_score(prompt) 
+        # Write out the first 
+        st.write(search[0][0].page_content) 
+        
 
 
-
-
-
-def main():
-    st.set_page_config("Chat PDF")
-    st.header("RAG based Chat with PDF")
-
-    user_question = st.text_input("Ask a Question from the PDF Files")
-
-    if user_question:
-        user_input(user_question)
-
-    with st.sidebar:
-        st.title("Menu:")
-        pdf_doc = st.file_uploader("Upload your PDF Files and Click on the Submit & Process Button", accept_multiple_files=True)
-        if st.button("Submit & Process"):
-            with st.spinner("Processing..."):
-                raw_text = pdf_read(pdf_doc)
-                text_chunks = get_chunks(raw_text)
-                vector_store(text_chunks)
-                st.success("Done")
-
-if __name__ == "__main__":
-    main()
